@@ -1,8 +1,12 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "framework": null,
   "cleanUrls": true,
   "trailingSlash": false,
+  "functions": {
+    "api/data.js": {
+      "maxDuration": 30
+    }
+  },
   "headers": [
     {
       "source": "/(.*)",
@@ -33,7 +37,7 @@
   ],
   "rewrites": [
     {
-      "source": "/((?!favicon\\.png$).*)",
+      "source": "/((?!api/|favicon\\.png$).*)",
       "destination": "/index.html"
     }
   ]

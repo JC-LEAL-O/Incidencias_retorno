@@ -1,9 +1,12 @@
 {
   "name": "historico-incidencias-retorno",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
-  "description": "Histórico de Incidencias Operacionales de Retorno de Reparto, Trazabilidad OT/Master, DEX y Dashboard KPI",
-  "scripts": {
-    "start": "npx --yes serve ."
+  "description": "Histórico de Incidencias Operacionales de Retorno de Reparto con almacenamiento persistente PostgreSQL en Vercel",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "postgres": "^3.4.5"
   }
 }

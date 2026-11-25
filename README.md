@@ -1,13 +1,8 @@
 # Histórico de Incidencias Operacionales – Retorno de Reparto
 
-Aplicación web estática (HTML + Tailwind CSS + Chart.js + SheetJS) para el registro estandarizado, trazabilidad histórica y análisis de **KPIs operacionales de retorno de reparto**.
+Aplicación web con **almacenamiento persistente en la nube (Vercel + PostgreSQL)** para el control, trazabilidad histórica y análisis de **KPIs operacionales de retorno de reparto**.
 
-## Características principales
-
-- **Formulario de ingreso estandarizado (10 campos):** OT/Master, Repartidor e ID bidireccionales con filtro dinámico letra por letra, Fecha, Clasificación (con opción *Otros*), Código DEX/DECK con explicación integrada, Bultos, Boletín de ocurrencias, Estado del boletín y Responsable.
-- **Base de personal Timecard integrada:** Gestión completa para agregar, modificar, eliminar, actualizar desde Excel (`.xlsx`) o restaurar la nómina original.
-- **Histórico auditable:** Filtros por Día, Semana, Mes, Año (2026+), Rango de fechas personalizado y Todo el historial; bitácora de modificaciones por incidencia.
-- **Dashboard KPI interactivo:** 12 indicadores en tiempo real, análisis de Pareto de códigos DEX, distribución por clasificación y cargo, ranking de riesgo por repartidor y exportación/importación Excel y JSON.
+Al vincular la base de datos en **Vercel Storage**, **ningún dato se pierde aunque se borre el caché del navegador, se formatee el computador o se ingrese desde distintos equipos**, soportando cientos de miles de registros en tiempo real.
 
 ---
 
@@ -15,42 +10,35 @@ Aplicación web estática (HTML + Tailwind CSS + Chart.js + SheetJS) para el reg
 
 ```text
 control-incidencias-retorno/
-├── index.html       # Aplicación principal autocontenida
+├── api/
+│   └── data.js      # API Serverless de Vercel (PostgreSQL auto-inicializable)
+├── index.html       # Aplicación principal con sincronización en la nube
 ├── favicon.png      # Ícono de pestaña del navegador
-├── vercel.json      # Configuración de despliegue y cabeceras para Vercel
-├── package.json     # Metadatos del proyecto
-├── .gitignore       # Archivos excluidos de Git
-└── README.md        # Documentación y guía de despliegue
+├── vercel.json      # Configuración de funciones serverless, rutas y seguridad
+├── package.json     # Dependencia PostgreSQL (postgres) para Vercel
+├── .gitignore       # Exclusiones de Git
+└── README.md        # Guía paso a paso de despliegue y base de datos
 ```
 
 ---
 
-## Cómo subir a GitHub y publicar en Vercel
+## Paso a paso: Subir a GitHub + Activar Base de Datos en Vercel
 
-### Opción A: Sin instalar nada (desde el navegador web)
+### Paso 1: Subir todos los archivos a GitHub
+1. Ingresa a [github.com/new](https://github.com/new) y crea un repositorio (ej. `control-incidencias-retorno`).
+2. Haz clic en **"uploading an existing file"**.
+3. Selecciona y arrastra **toda el contenido** de esta carpeta (incluyendo la carpeta **`api/`** con `data.js`, `index.html`, `favicon.png`, `vercel.json`, `package.json`, `.gitignore` y `README.md`).
+4. Haz clic en **"Commit changes"**.
 
-1. **Subir a GitHub:**
-   - Ingresa a [github.com/new](https://github.com/new) y crea un repositorio nuevo (por ejemplo `control-incidencias-retorno`, público o privado).
-   - En la pantalla del repositorio vacío haz clic en **"uploading an existing file"**.
-   - Arrastra todos los archivos de esta carpeta (`index.html`, `favicon.png`, `vercel.json`, `package.json`, `.gitignore`, `README.md`).
-   - Haz clic en **"Commit changes"**.
+### Paso 2: Importar el proyecto en Vercel
+1. Ingresa a [vercel.com/new](https://vercel.com/new) con tu cuenta de GitHub.
+2. Selecciona el repositorio `control-incidencias-retorno` y pulsa **"Import"** → **"Deploy"**.
 
-2. **Publicar en Vercel:**
-   - Ingresa a [vercel.com/new](https://vercel.com/new) e inicia sesión con tu cuenta de GitHub.
-   - Selecciona el repositorio `control-incidencias-retorno` y pulsa **"Import"**.
-   - Deja las opciones por defecto (*Framework Preset: Other*) y haz clic en **"Deploy"**.
-   - En pocos segundos obtendrás tu enlace público `https://...vercel.app` (cada cambio futuro en GitHub actualizará el sitio automáticamente).
+### Paso 3: Conectar la Base de Datos Permanente dentro de Vercel (Gratis, en 3 clics)
+1. Dentro de tu proyecto en Vercel, haz clic en la pestaña superior **"Storage"**.
+2. Pulsa **"Create Database"** → selecciona **"Neon (Serverless Postgres)"** (plan gratuito de 512 MB, capacidad para cientos de miles de incidencias) → **"Continue"**.
+3. Pulsa **"Connect Project"** (Vercel agregará automáticamente la variable `DATABASE_URL` / `POSTGRES_URL`) y ve a **Deployments → Redeploy**.
 
-### Opción B: Usando Git por terminal
-
-```bash
-cd "C:\Users\3630691\.gemini\antigravity\scratch\control-incidencias-retorno"
-git init
-git add .
-git commit -m "chore: versión inicial Histórico de Incidencias y KPIs"
-git branch -M main
-git remote add origin https://github.com/TU_USUARIO/control-incidencias-retorno.git
-git push -u origin main
-```
-
-> **Nota sobre almacenamiento de datos:** Los registros se almacenan localmente en el navegador (`localStorage`) de cada equipo. Utiliza periódicamente los botones **Exportar Excel** o **Respaldo (JSON)** del encabezado para respaldar o compartir el histórico entre equipos.
+¡Listo! Al abrir tu enlace `https://...vercel.app`:
+- El servidor creará automáticamente las tablas `incidencias`, `personal_timecard` y `custom_categories` y cargará los **81 funcionarios originales del Timecard**.
+- En la esquina superior derecha verás el botón en verde **`Nube activa (PostgreSQL)`**.

@@ -172,6 +172,10 @@
         </div>
       </div>
       <div class="flex flex-wrap items-center gap-2">
+        <button id="cloud-btn" type="button" onclick="openCloudModal()" class="btn btn-light" title="Estado de almacenamiento en la nube">
+          <i id="cloud-ico" class="fa-solid fa-cloud text-slate-400"></i>
+          <span id="cloud-txt" class="text-[11.5px]">Verificando nube…</span>
+        </button>
         <button id="hdr-alert" type="button" onclick="goPendingBulletins()" class="btn hidden bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100">
           <span class="relative flex h-2.5 w-2.5"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-500 opacity-75"></span><span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-rose-600"></span></span>
           <span id="hdr-alert-text">0 boletines pendientes</span>
@@ -571,7 +575,7 @@
     </section>
   </main>
 
-  <footer class="text-center text-[11px] text-slate-400 py-4">FedEx Express · Control de Retorno de Reparto · Datos almacenados localmente en este navegador (use "Respaldo" periódicamente)</footer>
+  <footer id="app-footer" class="text-center text-[11px] text-slate-400 py-4">FedEx Express · Control de Retorno de Reparto · Almacenamiento persistente en la nube (Vercel + PostgreSQL)</footer>
 
   <!-- Modal genérico -->
   <div id="modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-slate-900/60 p-4" onclick="if(event.target===this)closeModal()">
@@ -735,8 +739,11 @@
     function matchesTokens(hay, query) { const toks = norm(query).split(' ').filter(Boolean); return toks.every(t => hay.includes(t)); }
 
     // =====================================================================
-    // 3. PERSISTENCIA
+    // 3. PERSISTENCIA (NUBE VERCEL POSTGRESQL + CACHÉ LOCAL DE RESPALDO)
     // =====================================================================
+    state.cloudMode = 'checking'; // 'checking' | 'cloud' | 'syncing' | 'unconfigured' | 'local_file' | 'error'
+    state.cloudDetail = '';
+
     function defaultPersonal() {
       return TIMECARD_ORIGINAL
         .map(([n, i, c]) => ({ nombre: titleCase(n), id: String(i).trim(), cargo: String(c || '').trim().toUpperCase() }))
@@ -752,14 +759,148 @@
       } catch { state.personal = defaultPersonal(); }
       try { state.customCats = JSON.parse(localStorage.getItem(STORE.CUSTOM_CATS) || '[]'); } catch { state.customCats = []; }
       try { Object.assign(state.settings, JSON.parse(localStorage.getItem(STORE.SETTINGS) || '{}')); } catch { }
-      // Se elimina cualquier maestro de personal anterior: la única fuente es el Timecard
       try { localStorage.removeItem(LEGACY_COURIERS_KEY); } catch { }
     }
-    function safeSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { toast('No se pudo guardar en el navegador (almacenamiento lleno). Descargue un respaldo.', 'error'); return false; } }
+    function safeSet(k, v) {
+      try { localStorage.setItem(k, JSON.stringify(v)); return true; }
+      catch (e) {
+        if (state.cloudMode !== 'cloud' && state.cloudMode !== 'syncing') {
+          toast('Caché local llena. Conecte la base de datos en Vercel para almacenamiento ilimitado.', 'error');
+        }
+        return false;
+      }
+    }
     function saveRecords() { safeSet(STORE.RECORDS, state.records); }
     function savePersonal() { safeSet(STORE.PERSONAL, state.personal); }
     function saveSettings() { safeSet(STORE.SETTINGS, state.settings); }
     function saveCustomCats() { safeSet(STORE.CUSTOM_CATS, state.customCats); }
+
+    function renderCloudBadge() {
+      const btn = $('cloud-btn'), ico = $('cloud-ico'), txt = $('cloud-txt');
+      if (!btn || !ico || !txt) return;
+      const map = {
+        checking: ['bg-slate-50 text-slate-600 border-slate-200', 'fa-spinner fa-spin text-slate-500', 'Conectando nube…'],
+        syncing: ['bg-indigo-50 text-[#4D148C] border-indigo-200', 'fa-arrows-rotate fa-spin text-[#4D148C]', 'Guardando en nube…'],
+        cloud: ['bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100', 'fa-cloud-arrow-up text-emerald-600', 'Nube activa (PostgreSQL)'],
+        unconfigured: ['bg-amber-50 text-amber-800 border-amber-300 hover:bg-amber-100', 'fa-database text-amber-600', 'Activar BD en Vercel'],
+        local_file: ['bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100', 'fa-laptop text-slate-500', 'Modo archivo local'],
+        error: ['bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100', 'fa-triangle-exclamation text-rose-600', 'Error de sincronización']
+      };
+      const [cls, ic, label] = map[state.cloudMode] || map.checking;
+      btn.className = `btn ${cls}`;
+      ico.className = `fa-solid ${ic}`;
+      txt.textContent = label;
+    }
+
+    async function cloudPost(payload) {
+      if (state.cloudMode !== 'cloud' && state.cloudMode !== 'syncing' && state.cloudMode !== 'error') return false;
+      state.cloudMode = 'syncing'; renderCloudBadge();
+      try {
+        const r = await fetch('/api/data', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || j.error) throw new Error(j.detail || j.error || `HTTP ${r.status}`);
+        state.cloudMode = 'cloud'; state.cloudDetail = ''; renderCloudBadge();
+        return true;
+      } catch (err) {
+        console.error('Error guardando en nube:', err);
+        state.cloudMode = 'error'; state.cloudDetail = err.message || String(err); renderCloudBadge();
+        toast('Error al sincronizar con la base de datos en la nube: ' + state.cloudDetail, 'error');
+        return false;
+      }
+    }
+
+    async function cloudBulkUpsert(records, replaceAll = false) {
+      if (state.cloudMode !== 'cloud' && state.cloudMode !== 'syncing' && state.cloudMode !== 'error') return false;
+      const CHUNK = 350;
+      if (!records.length && replaceAll) {
+        return cloudPost({ action: 'bulk_upsert_records', records: [], replaceAll: true });
+      }
+      for (let i = 0; i < records.length; i += CHUNK) {
+        const ok = await cloudPost({
+          action: 'bulk_upsert_records',
+          records: records.slice(i, i + CHUNK),
+          replaceAll: replaceAll && i === 0
+        });
+        if (!ok) return false;
+      }
+      return true;
+    }
+
+    async function initCloudSync(manual = false) {
+      if (location.protocol === 'file:') {
+        state.cloudMode = 'local_file';
+        renderCloudBadge();
+        return;
+      }
+      state.cloudMode = 'checking'; renderCloudBadge();
+      try {
+        const res = await fetch('/api/data', { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!data.cloud) {
+          state.cloudMode = 'unconfigured';
+          state.cloudDetail = data.message || '';
+          renderCloudBadge();
+          return;
+        }
+        state.cloudMode = 'cloud'; state.cloudDetail = '';
+
+        // Si había registros locales previos y la nube está recién creada (0 registros), subirlos automáticamente
+        if (data.records.length === 0 && state.records.length > 0) {
+          await cloudBulkUpsert(state.records, false);
+          if (state.customCats.length) await cloudPost({ action: 'sync_custom_cats', customCats: state.customCats });
+          toast(`${state.records.length} registro(s) locales sincronizados con la nube.`, 'success');
+        } else {
+          state.records = Array.isArray(data.records) ? data.records : [];
+          if (Array.isArray(data.personal) && data.personal.length) state.personal = data.personal;
+          if (Array.isArray(data.customCats)) state.customCats = data.customCats;
+          if (data.timecardSource) state.settings.timecardSource = data.timecardSource;
+          else delete state.settings.timecardSource;
+          saveRecords(); savePersonal(); saveCustomCats(); saveSettings();
+        }
+        renderCloudBadge();
+        refreshAll();
+        if (manual) toast('Datos sincronizados desde PostgreSQL en Vercel.', 'success');
+      } catch (err) {
+        console.warn('API nube no disponible:', err);
+        state.cloudMode = 'unconfigured';
+        state.cloudDetail = err.message || '';
+        renderCloudBadge();
+      }
+    }
+
+    function openCloudModal() {
+      const isCloud = state.cloudMode === 'cloud' || state.cloudMode === 'syncing';
+      openModal(`${modalHead('fa-database', 'Almacenamiento Persistente en Vercel (PostgreSQL)', isCloud ? 'Conectado y respaldado automáticamente en la nube' : 'Cómo activar la base de datos permanente en 1 minuto')}
+        <div class="p-5 space-y-4 text-xs text-slate-700 overflow-y-auto">
+          ${isCloud ? `
+            <div class="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 space-y-1">
+              <div class="font-extrabold text-sm flex items-center gap-2"><i class="fa-solid fa-circle-check text-emerald-600"></i> Base de datos PostgreSQL activa</div>
+              <p>Todos los registros (<b>${state.records.length}</b> incidencias y <b>${state.personal.length}</b> funcionarios) se guardan directamente en el servidor PostgreSQL de Vercel.</p>
+              <p class="font-semibold">Borrar el caché del navegador, formatear el equipo o abrir el enlace desde otro computador NO provoca pérdida de información.</p>
+            </div>
+            <div class="flex justify-end gap-2">
+              <button type="button" class="btn btn-purple" onclick="closeModal(); initCloudSync(true)"><i class="fa-solid fa-arrows-rotate"></i> Recargar datos desde la nube</button>
+            </div>
+          ` : `
+            <div class="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 space-y-1">
+              <div class="font-bold text-sm"><i class="fa-solid fa-circle-info"></i> ${state.cloudMode === 'local_file' ? 'Estás abriendo el archivo directamente desde tu PC (file://)' : 'Falta vincular el almacén PostgreSQL en tu proyecto de Vercel'}</div>
+              <p>${state.cloudMode === 'local_file' ? 'Al subir el proyecto a GitHub + Vercel y conectar Storage, todos los datos quedarán guardados en la nube sin depender del caché del navegador.' : 'Sigue estos 3 pasos dentro de tu panel de Vercel (100% gratis, sin escribir código):'}</p>
+              ${state.cloudDetail ? `<p class="font-mono text-[11px] text-rose-700 mt-1">${esc(state.cloudDetail)}</p>` : ''}
+            </div>
+            <ol class="list-decimal pl-5 space-y-2 leading-relaxed">
+              <li>Abre tu proyecto en <b>Vercel</b> y entra en la pestaña superior <b>Storage</b>.</li>
+              <li>Haz clic en <b>Create Database</b> → elige <b>Neon (Serverless Postgres)</b> (plan gratuito) → pulsa <b>Continue</b>.</li>
+              <li>Haz clic en <b>Connect Project</b> (esto agrega automáticamente la variable <code class="px-1.5 py-0.5 rounded bg-slate-100 font-mono">DATABASE_URL</code>) y vuelve a desplegar (<b>Deployments → Redeploy</b>).</li>
+            </ol>
+            <p class="text-[11px] text-slate-500">Al abrir la app desplegada, las tablas y los 81 funcionarios del Timecard se crearán solos automáticamente y este indicador cambiará a <b class="text-emerald-700">Nube activa (PostgreSQL)</b>.</p>
+          `}
+        </div>`, 'max-w-xl');
+    }
 
     // =====================================================================
     // 4. CONSULTAS DE DOMINIO
@@ -1156,6 +1297,7 @@
       // clasificación personalizada (Otros) queda en la lista
       if (!BASE_CATEGORIES.some(c => norm(c) === norm(clas)) && !state.customCats.some(c => norm(c) === norm(clas))) {
         state.customCats.push(clas); saveCustomCats();
+        cloudPost({ action: 'sync_custom_cats', customCats: state.customCats });
       }
 
       const p = state.selectedRep;
@@ -1167,6 +1309,7 @@
         responsable: resp, observacion: $('f-obs').value.trim()
       };
 
+      let targetRec = null;
       if (state.editingId) {
         const rec = state.records.find(r => r.id === state.editingId);
         if (!rec) { toast('El registro ya no existe.', 'error'); resetForm(true); return; }
@@ -1175,14 +1318,17 @@
         Object.assign(rec, data, { actualizado: now });
         rec.historial = rec.historial || [];
         rec.historial.push({ fecha: now, accion: 'Modificación', usuario: resp, detalle: changes.join(' · ') });
+        targetRec = rec;
         toast(`Incidencia OT ${ot} actualizada (${changes.length} cambio(s)).`, 'success');
       } else {
         const rec = { id: uid(), ...data, creado: now, actualizado: now, historial: [{ fecha: now, accion: 'Registro inicial', usuario: resp, detalle: `${clas} · ${dex} · ${bultos}` }] };
         state.records.push(rec);
+        targetRec = rec;
         toast(`Incidencia OT ${ot} registrada para ${p.nombre}.`, 'success');
       }
       state.settings.responsable = resp; saveSettings();
       saveRecords();
+      if (targetRec) cloudPost({ action: 'upsert_record', record: targetRec });
       resetForm(false);
       refreshAll();
     }
@@ -1796,6 +1942,7 @@
       }
       state.personal.sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
       savePersonal();
+      cloudPost({ action: 'upsert_person', origId, person: entry });
       closeModal();
       refreshAll();
     }
@@ -1816,6 +1963,7 @@
             markRep(false);
           }
           savePersonal();
+          cloudPost({ action: 'delete_person', id: p.id });
           refreshAll();
           toast(`Funcionario ${p.nombre} eliminado.`, 'success');
         }
@@ -1845,7 +1993,12 @@
             title: 'Reemplazar personal',
             msg: `Se reemplazará el personal actual (<b>${state.personal.length}</b>) por <b>${uniq.length}</b> personas del archivo <b>${esc(file.name)}</b>. Las incidencias históricas no se modifican.`,
             okText: 'Reemplazar',
-            onOk: () => { state.personal = uniq; state.settings.timecardSource = file.name; savePersonal(); saveSettings(); refreshAll(); toast(`Timecard actualizado: ${uniq.length} personas.`, 'success'); }
+            onOk: () => {
+              state.personal = uniq; state.settings.timecardSource = file.name;
+              savePersonal(); saveSettings();
+              cloudPost({ action: 'replace_personal', personal: uniq, source: file.name });
+              refreshAll(); toast(`Timecard actualizado: ${uniq.length} personas.`, 'success');
+            }
           });
         } catch (err) { console.error(err); toast('No se pudo leer el archivo Excel.', 'error'); }
       };
@@ -1854,7 +2007,12 @@
     function restoreTimecard() {
       confirmBox({
         title: 'Restaurar Timecard original', msg: `Se restaurará la tabla original del Timecard (<b>${TIMECARD_ORIGINAL.length}</b> personas).`, okText: 'Restaurar',
-        onOk: () => { state.personal = defaultPersonal(); delete state.settings.timecardSource; savePersonal(); saveSettings(); refreshAll(); toast('Timecard original restaurado.', 'success'); }
+        onOk: () => {
+          state.personal = defaultPersonal(); delete state.settings.timecardSource;
+          savePersonal(); saveSettings();
+          cloudPost({ action: 'replace_personal', personal: state.personal, source: '' });
+          refreshAll(); toast('Timecard original restaurado.', 'success');
+        }
       });
     }
 
@@ -1923,7 +2081,7 @@
       r.estado_boletin = 'Emitido'; if (folio) r.folio = folio; if (r.boletin === 'No aplica') r.boletin = 'Sí';
       r.actualizado = now;
       (r.historial = r.historial || []).push({ fecha: now, accion: 'Boletín emitido', usuario: state.settings.responsable || '', detalle: folio ? `Folio ${folio}` : 'Sin folio' });
-      saveRecords(); refreshAll(); openDetail(id); toast('Boletín marcado como emitido.', 'success');
+      saveRecords(); cloudPost({ action: 'upsert_record', record: r }); refreshAll(); openDetail(id); toast('Boletín marcado como emitido.', 'success');
     }
 
     function openDriver(key) {
@@ -1987,7 +2145,9 @@
       openPassword(`Eliminar incidencia`, `Se eliminará la incidencia OT <b>${esc(r.ot)}</b> de ${esc(r.repartidor)} (${fmtDate(r.fecha)}). Esta acción no se puede deshacer.`, () => {
         state.records = state.records.filter(x => x.id !== id);
         if (state.editingId === id) resetForm(true);
-        saveRecords(); closeModal(); refreshAll(); toast('Incidencia eliminada.', 'success');
+        saveRecords();
+        cloudPost({ action: 'delete_record', id, password: DELETE_PASSWORD });
+        closeModal(); refreshAll(); toast('Incidencia eliminada.', 'success');
       });
     }
     function openPassword(title, msg, cb) {
@@ -2054,6 +2214,7 @@
           const existing = new Set(state.records.map(keyOf));
           let added = 0, updated = 0, skipped = 0;
           const now = new Date().toISOString();
+          const touched = [];
           raw.forEach(row => {
             const ot = cleanOT(pick(row, 'ot / master', 'ot', 'master', 'n° ot', 'ot o master'));
             const fecha = excelDateToISO(pick(row, 'fecha'));
@@ -2075,12 +2236,16 @@
             };
             const rid = String(pick(row, 'id registro')).trim();
             const ex = rid && state.records.find(x => x.id === rid);
-            if (ex) { Object.assign(ex, rec, { actualizado: now }); (ex.historial = ex.historial || []).push({ fecha: now, accion: 'Actualizado por importación', usuario: '', detalle: file.name }); updated++; return; }
+            if (ex) { Object.assign(ex, rec, { actualizado: now }); (ex.historial = ex.historial || []).push({ fecha: now, accion: 'Actualizado por importación', usuario: '', detalle: file.name }); touched.push(ex); updated++; return; }
             if (existing.has(keyOf(rec))) { skipped++; return; }
-            state.records.push({ id: uid(), ...rec, creado: now, actualizado: now, historial: [{ fecha: now, accion: 'Importado desde Excel', usuario: '', detalle: file.name }] });
+            const newRec = { id: uid(), ...rec, creado: now, actualizado: now, historial: [{ fecha: now, accion: 'Importado desde Excel', usuario: '', detalle: file.name }] };
+            state.records.push(newRec);
+            touched.push(newRec);
             existing.add(keyOf(rec)); added++;
           });
-          saveRecords(); refreshAll();
+          saveRecords();
+          if (touched.length) cloudBulkUpsert(touched, false);
+          refreshAll();
           toast(`Importación: ${added} nuevos · ${updated} actualizados · ${skipped} omitidos.`, added || updated ? 'success' : 'info');
         } catch (err) { console.error(err); toast('No se pudo leer el archivo.', 'error'); }
       };
@@ -2104,11 +2269,15 @@
           confirmBox({
             title: 'Restaurar respaldo', okText: 'Restaurar',
             msg: `Se reemplazarán los datos actuales por el respaldo del <b>${fmtTS(d.exportado)}</b>: <b>${d.records.length}</b> incidencias${Array.isArray(d.personal) ? ` y <b>${d.personal.length}</b> personas` : ''}.`,
-            onOk: () => {
+            onOk: async () => {
               state.records = d.records;
               if (Array.isArray(d.personal) && d.personal.length) state.personal = d.personal;
               if (Array.isArray(d.customCats)) state.customCats = d.customCats;
-              saveRecords(); savePersonal(); saveCustomCats(); refreshAll(); toast('Respaldo restaurado.', 'success');
+              saveRecords(); savePersonal(); saveCustomCats();
+              await cloudBulkUpsert(state.records, true);
+              if (Array.isArray(d.personal) && d.personal.length) await cloudPost({ action: 'replace_personal', personal: state.personal, source: d.settings?.timecardSource || '' });
+              if (state.customCats.length) await cloudPost({ action: 'sync_custom_cats', customCats: state.customCats });
+              refreshAll(); toast('Respaldo restaurado.', 'success');
             }
           });
         } catch { toast('Archivo de respaldo inválido.', 'error'); }
@@ -2130,20 +2299,24 @@
       let legacy = [];
       try { legacy = JSON.parse(localStorage.getItem(LEGACY_RECORDS_KEY) || '[]').filter(r => r && !String(r.id || '').startsWith('demo_')); } catch { }
       const map = { 'faltante / entrega parcial': 'Faltante', 'mal asignado': 'Mal asignado', 'error de bodega / sin nominar': 'Error en bodega', 'gestion cliente / aplazado': 'Gestión cliente / Aplazado', 'resguardo especial (valorado / refrigerado)': 'Resguardo especial (Valorado / Refrigerado)' };
-      const now = new Date().toISOString(); let n = 0;
+      const now = new Date().toISOString(); let n = 0; const migrated = [];
       legacy.forEach(o => {
         const p = personByName(o.repartidor) || state.personal.find(x => norm(o.repartidor).split(' ').every(t => norm(x.nombre).includes(t)));
         const clas = map[norm(o.clasificacion)] || o.clasificacion || 'Otros';
         const boletin = o.boletin === 'Sí' ? 'Sí' : o.boletin === 'No' ? 'No' : 'No aplica';
-        state.records.push({
+        const rec = {
           id: uid(), ot: cleanOT(o.ot), fecha: o.fecha, repartidor: p ? p.nombre : o.repartidor, id_repartidor: p ? p.id : '', cargo: p ? p.cargo : '',
           clasificacion: clas, dex: o.dex || 'SIN DEX', bultos: String(o.bultos || '1'), boletin, estado_boletin: boletin === 'Sí' ? 'Emitido' : boletin === 'No' ? 'Pendiente' : '',
           folio: o.folio_boletin || '', responsable: o.asignado_por || '', observacion: o.comentario || '',
           creado: o.fecha_creacion || now, actualizado: now, historial: [...(o.historial || []).map(h => ({ fecha: h.fecha, accion: h.accion, usuario: h.operador, detalle: h.detalle })), { fecha: now, accion: 'Migrado desde versión anterior', usuario: '', detalle: '' }]
-        });
+        };
+        state.records.push(rec);
+        migrated.push(rec);
         n++;
       });
-      state.settings.legacyHandled = true; saveSettings(); saveRecords(); refreshAll();
+      state.settings.legacyHandled = true; saveSettings(); saveRecords();
+      if (migrated.length) cloudBulkUpsert(migrated, false);
+      refreshAll();
       toast(`${n} incidencias migradas al histórico.`, 'success');
     }
     function dismissLegacy() { state.settings.legacyHandled = true; saveSettings(); checkLegacy(); }
@@ -2220,6 +2393,7 @@
       refreshAll();
       switchTab(['registro', 'historico', 'dashboard', 'personal'].includes(state.settings.tab) ? state.settings.tab : 'registro');
       renderRepInfo(false);
+      initCloudSync(false);
     });
   </script>
 </body>
