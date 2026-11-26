@@ -173,12 +173,18 @@ module.exports = async function handler(req, res) {
         historial: typeof r.historial === 'string' ? JSON.parse(r.historial || '[]') : (r.historial || [])
       }));
 
+      let authUsers = null, rolePerms = null;
+      try { if (meta.auth_users) authUsers = JSON.parse(meta.auth_users); } catch {}
+      try { if (meta.role_perms) rolePerms = JSON.parse(meta.role_perms); } catch {}
+
       return res.status(200).json({
         cloud: true,
         records,
         personal: perRows,
         customCats: catRows.map(c => c.nombre),
-        timecardSource: meta.timecard_source || ''
+        timecardSource: meta.timecard_source || '',
+        authUsers,
+        rolePerms
       });
     }
 
@@ -269,12 +275,27 @@ module.exports = async function handler(req, res) {
     }
 
     if (action === 'delete_record') {
-      if (String(body.password || '').trim() !== DELETE_PASSWORD) {
-        return res.status(403).json({ error: 'Contraseña de autorización inválida.' });
-      }
       const id = String(body.id || '').trim();
       if (!id) return res.status(400).json({ error: 'ID requerido.' });
       await sql`DELETE FROM incidencias WHERE id = ${id}`;
+      return res.status(200).json({ ok: true });
+    }
+
+    if (action === 'save_auth_config') {
+      if (Array.isArray(body.authUsers)) {
+        await sql`
+          INSERT INTO app_meta (key, value)
+          VALUES ('auth_users', ${JSON.stringify(body.authUsers)})
+          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        `;
+      }
+      if (body.rolePerms && typeof body.rolePerms === 'object') {
+        await sql`
+          INSERT INTO app_meta (key, value)
+          VALUES ('role_perms', ${JSON.stringify(body.rolePerms)})
+          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+        `;
+      }
       return res.status(200).json({ ok: true });
     }
 
